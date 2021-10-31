@@ -11,6 +11,7 @@
 #include <websocketpp/server.hpp>
 
 #include <json.hpp> 
+#include <unistd.h>
 
 typedef websocketpp::server<websocketpp::config::asio> server;
 
@@ -20,26 +21,173 @@ using websocketpp::lib::bind;
 using nlohmann::json;
 typedef server::message_ptr message_ptr;
 
-void enumerate_ports()
+#define BAUDRATE 921600
+#define COM_PORT "/dev/ttyUSB0"
+#define MAX_STACK_SIZE 500
+
+void push_command(serial::Serial& my_serial, uint32_t address, uint32_t value)
 {
-        std::vector<serial::PortInfo> devices_found = serial::list_ports();
+	my_serial.write((uint8_t*)&address, sizeof address);
+	my_serial.write((uint8_t*)&value, sizeof value);
+} 
 
-        std::vector<serial::PortInfo>::iterator iter = devices_found.begin();
+uint32_t read_command(serial::Serial& my_serial, uint32_t address, uint32_t value = 0)
+{
+	my_serial.write((uint8_t*)&address, sizeof address);
+	my_serial.write((uint8_t*)&value, sizeof value);
 
-        while( iter != devices_found.end() )
-        {
-                serial::PortInfo device = *iter++;
+	uint32_t a = 0;
+	my_serial.read((uint8_t*)&a, sizeof a);
 
-                printf( "(%s, %s, %s)\n", device.port.c_str(), device.description.c_str(),
-     device.hardware_id.c_str() );
-        }
+	return a;
+}
+
+
+std::string write(serial::Serial & my_serial, uint32_t address, uint32_t value)
+{
+	std::stringstream ss;
+
+	push_command(my_serial, address, value);
+	ss << "Writing [" << std::hex << address << "] -> 0x" << std::hex << value << std::endl;
+
+	return ss.str();
+}
+
+void execute(serial::Serial & my_serial)
+{
+	push_command(my_serial, 1000, 0);
+
+	printf("Writing execute.\n");
+}
+
+std::string read(serial::Serial & my_serial)
+{
+	std::stringstream ss;  
+
+	ss.setf(std::ios::fixed, std::ios::floatfield);
+	ss.setf(std::ios::showpoint);
+	uint32_t value = 0;
+
+	value = read_command(my_serial, 1001);
+	ss << "Register A: " << "0x" << std::hex << std::setw(8) << std::setfill('0') << value;
+	ss << " (" << std::dec << value << "u) " << "(" << std::dec << (int32_t)value << ") " << "(" << *(float*)((char*)&value) << "f)" << std::endl;
+
+	value = read_command(my_serial, 1002);
+	ss << "Register B: " << "0x" << std::hex << std::setw(8) << std::setfill('0') << value;
+	ss << " (" << std::dec << value << "u) " << "(" << std::dec << (int32_t)value << ") " << "(" << *(float*)((char*)&value) << "f)" << std::endl;
+
+	value = read_command(my_serial, 1003);
+	ss << "Register R: " << "0x" << std::hex << std::setw(8) << std::setfill('0') << value;
+	ss << " (" << std::dec << value << "u) " << "(" << std::dec << (int32_t)value << ") " << "(" << *(float*)((char*)&value) << "f)" << std::endl;
+
+	ss << std::endl << "Flags:" << std::endl;
+
+	ss << "Zero: " << std::dec << read_command(my_serial, 1004) << std::endl;
+	ss << "Greater Than: " << std::dec << read_command(my_serial, 1005) << std::endl;
+	ss << "Less Than: " << std::dec << read_command(my_serial, 1006) << std::endl;
+	ss << "Out of Time: " << std::dec << read_command(my_serial, 1007) << std::endl;
+
+	return ss.str();
 }
 
 void on_message(server* s, websocketpp::connection_hdl hdl, message_ptr msg) 
 {
 	try
 	{
-		s->send(hdl, "Hi.\n", msg->get_opcode());
+		s->send(hdl, "Uploading.\n", msg->get_opcode());
+		s->poll();
+
+		std::hash<std::string> hasher;
+
+		auto payload = msg->get_payload();
+		auto message = json::parse(payload);
+		auto hash = hasher(payload);
+
+		serial::Serial my_serial(COM_PORT, BAUDRATE, serial::Timeout::simpleTimeout(30000));
+		std::cout << my_serial.isOpen();
+
+		std::vector<uint32_t> stack = message["stack"];
+		 
+		if (stack.size() > MAX_STACK_SIZE)
+		{
+			s->send(hdl, "Out of bounds write.\n", msg->get_opcode());
+			s->poll();
+			return;
+		}
+
+		int index = 0; 
+		for (auto const& item : stack) 
+		{
+			s->send(hdl, write(my_serial, index++, item), msg->get_opcode());
+			s->poll();
+		}
+
+		s->send(hdl, "Executing.\n", msg->get_opcode());
+		s->poll(); 
+		
+		execute(my_serial);
+		 
+		while (read_command(my_serial, 1008))
+		{
+			usleep(100000);
+		}
+		
+		std::stringstream ss;
+		ss.setf(std::ios::fixed, std::ios::floatfield);
+		ss.setf(std::ios::showpoint);
+
+		ss << std::endl << "Registers:" << std::endl;
+		ss << read(my_serial) << std::endl;
+
+		ss << "Memory Regions:" << std::endl;
+		std::vector<json> readRegions = message["readRegions"];
+
+		for (int i = 0; i < readRegions.size(); i++)
+		{
+			uint32_t address = readRegions[i]["address"];
+			std::string name = readRegions[i]["name"];
+
+			if (address > MAX_STACK_SIZE)
+			{
+				s->send(hdl, "Out of bounds read.\n", msg->get_opcode());
+				s->poll();
+				continue;
+			}
+
+			ss << "[" << name << " -> 0x" << std::hex << std::setfill('0') << address << "] ";
+			auto value = read_command(my_serial, 1009, address);
+
+			ss << "0x" << std::hex << std::setw(8) << std::setfill('0') << value;
+			ss << " (" << std::dec << value << "u) " << "(" << std::dec << (int32_t)value << ") " << "(" << *(float*)((char*)&value) << "f)" << std::endl;
+		}
+
+		//////////////////////////////////////////////////////
+
+		if (readRegions.size() == 0) 
+		{
+			std::vector<uint32_t> regions = message["regions"];
+
+			for (auto const& item : regions)
+			{
+				if (item > MAX_STACK_SIZE)
+				{
+					s->send(hdl, "Out of bounds read.\n", msg->get_opcode());
+					s->poll();
+					continue;
+				}
+
+				ss << "[a" << std::dec << item - stack.size() << " -> 0x" << std::hex << std::setfill('0') << item << "] ";
+				auto value = read_command(my_serial, 1009, item);
+
+				ss << "0x" << std::hex << std::setw(8) << std::setfill('0') << value;
+				ss << " (" << std::dec << value << "u) " << "(" << std::dec << (int32_t)value << ") " << "(" << *(float*)((char*)&value) << "f)" << std::endl;
+			}
+		}
+
+		s->send(hdl, ss.str(), msg->get_opcode());
+		s->poll();
+
+		s->send(hdl, "Finished.\n", msg->get_opcode());
 		s->poll();
 	}
 	catch (json::exception const & e)
@@ -63,8 +211,6 @@ void on_message(server* s, websocketpp::connection_hdl hdl, message_ptr msg)
 
 int main()
 {	
-	enumerate_ports();
-	
 	server echo_server;
 
 	try
