@@ -129,7 +129,7 @@ void on_message(server* s, websocketpp::connection_hdl hdl, message_ptr msg)
 		 
 		while (read_command(my_serial, 1008))
 		{
-			usleep(100000);
+			usleep(100000/5);
 		}
 		
 		std::stringstream ss;
@@ -160,8 +160,6 @@ void on_message(server* s, websocketpp::connection_hdl hdl, message_ptr msg)
 			ss << "0x" << std::hex << std::setw(8) << std::setfill('0') << value;
 			ss << " (" << std::dec << value << "u) " << "(" << std::dec << (int32_t)value << ") " << "(" << *(float*)((char*)&value) << "f)" << std::endl;
 		}
-
-		//////////////////////////////////////////////////////
 
 		if (readRegions.size() == 0) 
 		{
