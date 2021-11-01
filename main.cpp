@@ -129,7 +129,7 @@ void on_message(server* s, websocketpp::connection_hdl hdl, message_ptr msg)
 		 
 		while (read_command(my_serial, 1008))
 		{
-			usleep(100000/5);
+			usleep(100000);
 		}
 		
 		std::stringstream ss;
