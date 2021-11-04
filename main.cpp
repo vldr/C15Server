@@ -94,8 +94,11 @@ void on_message(server* s, websocketpp::connection_hdl hdl, message_ptr msg)
 {
 	try
 	{
-		s->send(hdl, "Uploading.\n", msg->get_opcode());
-		s->poll();
+		std::stringstream ss;
+		ss.setf(std::ios::fixed, std::ios::floatfield);
+		ss.setf(std::ios::showpoint);
+
+		ss << "Uploading.\n";
 
 		std::hash<std::string> hasher;
 
@@ -104,37 +107,32 @@ void on_message(server* s, websocketpp::connection_hdl hdl, message_ptr msg)
 		auto hash = hasher(payload);
 
 		serial::Serial my_serial(COM_PORT, BAUDRATE, serial::Timeout::simpleTimeout(30000));
-		std::cout << my_serial.isOpen();
-
 		std::vector<uint32_t> stack = message["stack"];
 		 
 		if (stack.size() > MAX_STACK_SIZE)
 		{
-			s->send(hdl, "Out of bounds write.\n", msg->get_opcode());
+			ss << "Out of bounds write.\n";
+
+			s->send(hdl, ss.str(), msg->get_opcode());
 			s->poll();
+
 			return;
 		}
 
 		int index = 0; 
 		for (auto const& item : stack) 
 		{
-			s->send(hdl, write(my_serial, index++, item), msg->get_opcode());
-			s->poll();
+			ss << write(my_serial, index++, item);
 		}
 
-		s->send(hdl, "Executing.\n", msg->get_opcode());
-		s->poll(); 
+		ss << "Executing.\n";
 		
 		execute(my_serial);
 		 
 		while (read_command(my_serial, 1008))
 		{
-			usleep(100000);
+			usleep(100000 >> 2);
 		}
-		
-		std::stringstream ss;
-		ss.setf(std::ios::fixed, std::ios::floatfield);
-		ss.setf(std::ios::showpoint);
 
 		ss << std::endl << "Registers:" << std::endl;
 		ss << read(my_serial) << std::endl;
@@ -149,8 +147,7 @@ void on_message(server* s, websocketpp::connection_hdl hdl, message_ptr msg)
 
 			if (address > MAX_STACK_SIZE)
 			{
-				s->send(hdl, "Out of bounds read.\n", msg->get_opcode());
-				s->poll();
+				ss << "Out of bounds read.\n";
 				continue;
 			}
 
@@ -169,8 +166,7 @@ void on_message(server* s, websocketpp::connection_hdl hdl, message_ptr msg)
 			{
 				if (item > MAX_STACK_SIZE)
 				{
-					s->send(hdl, "Out of bounds read.\n", msg->get_opcode());
-					s->poll();
+					ss << "Out of bounds read.\n";
 					continue;
 				}
 
@@ -182,10 +178,9 @@ void on_message(server* s, websocketpp::connection_hdl hdl, message_ptr msg)
 			}
 		}
 
-		s->send(hdl, ss.str(), msg->get_opcode());
-		s->poll();
+		ss << "Finished.\n";
 
-		s->send(hdl, "Finished.\n", msg->get_opcode());
+		s->send(hdl, ss.str(), msg->get_opcode());
 		s->poll();
 	}
 	catch (json::exception const & e)
@@ -233,4 +228,3 @@ int main()
 	
 	return 0;
 }
-	
